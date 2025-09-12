@@ -1,247 +1,271 @@
-//TODO
-// Enemies with gifs
-// Enemies movement
-// Enemy AI
-// Enemy in minimap
-
-
 #![allow(unused_imports)]
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
 use std::thread;
+use nalgebra_glm::Vec3;
 use std::time::{Duration, Instant};
 use raylib::ffi::TextFormat;
 use raylib::prelude::*;
 use raylib::prelude::RaylibDraw;
 use std::f32::consts::PI;
-use std::fs::File;
 use std::io::BufReader;
 
 mod framebuffers;
-mod maze;
-mod player;
-mod line;
-mod caster;
+mod ray_intersect;
 mod texture;
-mod sprites;
+mod cube;
+mod lights;
+mod material;
+mod camera;
 
-use line::line;
-use maze::{Maze,load_maze};
-use caster::{cast_ray, Intersect};
-use player::{Player, process_events};
+const ORIGIN_BIAS: f32 = 1e-4;
+
 use framebuffers::FrameBuffer;
 use texture::TextureManager;
-use sprites::Sprite;
+use ray_intersect::{Intersect, RayIntersect};
+use cube::Cube;
+use camera::Camera;
+use lights::Light;
+use material::{Material, vector3_to_color};
 
 const TRANSPARENT_COLOR: Color = Color::new(152, 0, 136, 255);
 
-fn cell_to_color(cell: char) -> Color {
-    match cell {
-        '+' => {
-            return Color::from_hex("836c92").unwrap();
-        },
-        '-' => {
-            return Color::from_hex("836c92").unwrap();
-        },
-        '|' => {
-            return Color::from_hex("836c92").unwrap();
-        },
-        'g' => {
-            return Color::GREEN;
-        },
-        'p' => {
-            return Color::YELLOW;
-        },
-        'c' => {
-            return Color::WHITE;
-        },
-        _ => {
-            return Color::BLACK;
-        },
-        
+fn procedural_sky(dir: Vector3) -> Vector3 {
+    let d = dir.normalized();
+    let t = (d.y + 1.0) * 0.5; // map y [-1,1] → [0,1]
+
+    let green = Vector3::new(0.1, 0.6, 0.2); // grass green
+    let white = Vector3::new(1.0, 1.0, 1.0); // horizon haze
+    let blue = Vector3::new(0.3, 0.5, 1.0);  // sky blue
+
+    if t < 0.54 {
+        // Bottom → fade green to white
+        let k = t / 0.55;
+        green * (1.0 - k) + white * k
+    } else if t < 0.55 {
+        // Around horizon → mostly white
+        white
+    } else if t < 0.8 {
+        // Fade white to blue
+        let k = (t - 0.55) / (0.25);
+        white * (1.0 - k) + blue * k
+    } else {
+        // Upper sky → solid blue
+        blue
     }
 }
 
-fn draw_cell(
-  framebuffer: &mut FrameBuffer,
-  xo: usize,
-  yo: usize,
-  block_size: usize,
-  cell: char,
-) {
-  if cell == ' ' {
-    return;
-  }
-  let color = cell_to_color(cell);
-
-  for x in xo..xo + block_size {
-    for y in yo..yo + block_size {
-      framebuffer.set_pixel(x as i32, y as i32, color);
+fn offset_origin(intersect: &Intersect, direction: &Vector3) -> Vector3 {
+    let offset = intersect.normal * ORIGIN_BIAS;
+    if direction.dot(intersect.normal) < 0.0 {
+        intersect.point - offset
+    } else {
+        intersect.point + offset
     }
-  }
 }
 
-pub fn render_maze(
-  framebuffer: &mut FrameBuffer,
-  maze: &Maze,
-  block_size: usize,
-  player: &Player,
-) {
-  for (row_index, row) in maze.iter().enumerate() {
-    for (col_index, &cell) in row.iter().enumerate() {
-      let xo = col_index * block_size;
-      let yo = row_index * block_size;
-      if cell == 'c' {
-        draw_cell(framebuffer, xo, yo + 7, 5, cell);
-      } else {
-        draw_cell(framebuffer, xo, yo, block_size, cell);
-      }
-    }
-  }
-
-  
-
-  draw_cell(
-    framebuffer,
-    (player.pos.x / 7.0) as usize,
-    (player.pos.y / 6.8) as usize,
-    7,
-    'p'
-  );
+fn reflect(incident: &Vector3, normal: &Vector3) -> Vector3 {
+    *incident - *normal * 2.0 * incident.dot(*normal)
 }
 
-fn render_world(
-  framebuffer: &mut FrameBuffer,
-  texture_manager: &TextureManager,
-  maze: &Maze,
-  block_size: usize,
-  player: &Player,
-  z_buffer: &mut Vec<f32>,
-) {
-  let num_rays = framebuffer.image_width;
+fn refract(incident: &Vector3, normal: &Vector3, refractive_index: f32) -> Option<Vector3> {
+    // Implementation of Snell's Law for refraction.
+    // It calculates the direction of a ray as it passes from one medium to another.
 
-  // let hw = framebuffer.width as f32 / 2.0;   
-  let hh = framebuffer.image_height as f32 / 2.0;  
+    // `cosi` is the cosine of the angle between the incident ray and the normal.
+    // We clamp it to the [-1, 1] range to avoid floating point errors.
+    let mut cosi = incident.dot(*normal).max(-1.0).min(1.0);
 
+    // `etai` is the refractive index of the medium the ray is currently in.
+    // `etat` is the refractive index of the medium the ray is entering.
+    // `n` is the normal vector, which may be flipped depending on the ray's direction.
+    let mut etai = 1.0; // Assume we are in Air (or vacuum) initially
+    let mut etat = refractive_index;
+    let mut n = *normal;
 
-  for i in 0..num_rays {
-    let current_ray = i as f32 / num_rays as f32; 
-    let a = player.a - (player.fov / 2.0) + (player.fov * current_ray);
-    let intersect = cast_ray(framebuffer, &maze, &player, a, block_size, false);
+    if cosi > 0.0 {
+        // The ray is inside the medium (e.g., glass) and going out into the air.
+        // We need to swap the refractive indices.
+        std::mem::swap(&mut etai, &mut etat);
+        // We also flip the normal so it points away from the medium.
+        n = -n;
+    } else {
+        // The ray is outside the medium and going in.
+        // We need a positive cosine for the calculation, so we negate it.
+        cosi = -cosi;
+    }
 
-    
-    let distance_to_wall = intersect.distance;
-    z_buffer[i as usize] = distance_to_wall;
-    let distance_to_projection_plane = 100.0;
-        let stake_height = (hh / distance_to_wall) * distance_to_projection_plane;
+    // `eta` is the ratio of the refractive indices (n1 / n2).
+    let eta = etai / etat;
+    // `k` is a term derived from Snell's law that helps determine if total internal reflection occurs.
+    let k = 1.0 - eta * eta * (1.0 - cosi * cosi);
 
-        let stake_top = (hh - (stake_height / 2.0)) as isize;
-        let stake_bottom = (hh + (stake_height / 2.0)) as isize;
+    if k < 0.0 {
+        // If k is negative, it means total internal reflection has occurred.
+        // There is no refracted ray, so we return None.
+        None
+    } else {
+        // If k is non-negative, we can calculate the direction of the refracted ray.
+        Some(*incident * eta + n * (eta * cosi - k.sqrt()))
+    }
+}
 
-        let texture_ref = if let Some(texture) = texture_manager.get_texture(intersect.impact) {
-            texture
-        } else {
-            continue;
+fn cast_shadow(
+    intersect: &Intersect,
+    light: &Light,
+    objects: &[Cube],
+) -> f32 {
+    let light_dir = (light.position - intersect.point).normalized();
+    let light_distance = (light.position - intersect.point).length();
+
+    let shadow_ray_origin = offset_origin(intersect, &light_dir);
+
+    for object in objects {
+        let shadow_intersect = object.ray_intersect(&shadow_ray_origin, &light_dir);
+        if shadow_intersect.is_intersecting && shadow_intersect.distance < light_distance {
+            return 1.0; // Hit something, full shadow
+        }
+    }
+
+    0.0 // No shadow
+}
+
+pub fn cast_ray(
+    ray_origin: &Vector3,
+    ray_direction: &Vector3,
+    objects: &[Cube],
+    light: &Light,
+    texture_manager: &TextureManager,
+    depth: u32,
+) -> Vector3 {
+    if depth > 3 {
+        return procedural_sky(*ray_direction);
+        // return SKYBOX_COLOR;
+    }
+
+    let mut intersect = Intersect::empty();
+    let mut zbuffer = f32::INFINITY;
+
+    for object in objects {
+        let i = object.ray_intersect(ray_origin, ray_direction);
+        if i.is_intersecting && i.distance < zbuffer {
+            zbuffer = i.distance;
+            intersect = i;
+        }
+    }
+
+    if !intersect.is_intersecting {
+        return procedural_sky(*ray_direction);
+        // return SKYBOX_COLOR;
+    }
+
+    let light_dir = (light.position - intersect.point).normalized();
+    let view_dir = (*ray_origin - intersect.point).normalized();
+    let reflect_dir = reflect(&-light_dir, &intersect.normal).normalized();
+
+    let shadow_intensity = cast_shadow(&intersect, light, objects);
+    let light_intensity = light.intensity * (1.0 - shadow_intensity);
+
+    let diffuse_color = if let Some(texture_path) = &intersect.material.texture_id {
+        let texture = texture_manager.get_texture(texture_path).unwrap();
+        let width = texture.width() as u32;
+        let height = texture.height() as u32;
+
+        // Compute (u, v) based on which face was hit so each face gets the full texture.
+        let (u, v) = match intersect.face {
+            Some(face) => {
+                let local = intersect.local_pos; // local_pos should be the hit point in cube-local space [-0.5, 0.5]
+                match face {
+                    0 => ((local.z + 0.5), (0.5 - local.y)), // +X face
+                    1 => ((0.5 - local.z), (0.5 - local.y)), // -X face
+                    2 => ((local.x + 0.5), (local.z + 0.5)), // +Y face
+                    3 => ((local.x + 0.5), (0.5 - local.z)), // -Y face
+                    4 => ((local.x + 0.5), (0.5 - local.y)), // +Z face (front)
+                    5 => ((0.5 - local.x), (0.5 - local.y)), // -Z face (back)
+                    _ => (intersect.u, intersect.v),
+                }
+            }
+            None => (intersect.u, intersect.v),
         };
-        let tw_u = texture_ref.width();
-        let th_u = texture_ref.height();
+        let u = u.max(0.0).min(1.0);
+        let v = v.max(0.0).min(1.0);
 
-        let ys = stake_top.max(0) as usize;
-        let ye = stake_bottom.min(framebuffer.image_height as isize - 1) as usize;
+        let tx = (u * (width as f32 - 1.0)).round() as u32;
+        let ty = (v * (height as f32 - 1.0)).round() as u32;
 
-        for y in ys..=ye {
-            let v = (y as f32 - ys as f32) / ((ye - ys).max(1) as f32);
-            let tex_y = (v * th_u as f32) as u32;
+        texture_manager.get_pixel_color(texture_path, tx, ty)
+    } else {
+        intersect.material.diffuse
+    };
 
-            let color = texture_manager.get_pixel_color(
-                intersect.impact,
-                intersect.impact_x as u32 % tw_u as u32,
-                tex_y,
-            );
+    let diffuse_intensity = intersect.normal.dot(light_dir).max(0.0) * light_intensity;
+    let diffuse = diffuse_color * diffuse_intensity;
 
-            framebuffer.set_pixel(i, y as i32, color);
+    let specular_intensity = view_dir.dot(reflect_dir).max(0.0).powf(intersect.material.specular) * light_intensity;
+    let light_color_v3 = Vector3::new(light.color.r as f32 / 255.0, light.color.g as f32 / 255.0, light.color.b as f32 / 255.0);
+    let specular = light_color_v3 * specular_intensity;
+
+    let albedo = intersect.material.albedo;
+    let phong_color = diffuse * albedo[0] + specular * albedo[1];
+
+    // Reflections
+    let reflectivity = intersect.material.albedo[2];
+    let reflect_color = if reflectivity > 0.0 {
+        let reflect_dir = reflect(ray_direction, &intersect.normal).normalized();
+        let reflect_origin = offset_origin(&intersect, &reflect_dir);
+        cast_ray(&reflect_origin, &reflect_dir, objects, light, texture_manager, depth + 1)
+    } else {
+        Vector3::zero()
+    };
+
+    // Refractions
+    let transparency = intersect.material.albedo[3];
+    let refract_color = if transparency > 0.0 {
+        // Calculate the refracted ray direction. This can fail (return None) in case of total internal reflection.
+        if let Some(refract_dir) = refract(ray_direction, &intersect.normal, intersect.material.refractive_index) {
+            // If refraction is possible, cast a new ray.
+            let refract_origin = offset_origin(&intersect, &refract_dir);
+            cast_ray(&refract_origin, &refract_dir, objects, light, texture_manager, depth + 1)
+        } else {
+            // Total internal reflection occurred. In this case, the light is perfectly reflected.
+            // We cast a reflection ray instead of a refraction ray.
+            let reflect_dir = reflect(ray_direction, &intersect.normal).normalized();
+            let reflect_origin = offset_origin(&intersect, &reflect_dir);
+            cast_ray(&reflect_origin, &reflect_dir, objects, light, texture_manager, depth + 1)
         }
-    }
+    } else {
+        // If the material is not transparent, the refracted color is black.
+        Vector3::zero()
+    };
+
+    // Combine the Phong color with the reflected and refracted colors using the material's albedo values.
+    phong_color * (1.0 - reflectivity - transparency) + reflect_color * reflectivity + refract_color * transparency
 }
 
-fn render_sprites(
-    framebuffer: &mut FrameBuffer,
-    maze: &Maze,
-    player: &Player,
-    texture_manager: &TextureManager,
-    block_size: usize,
-    z_buffer: &Vec<f32>,
-){
-    
-    for row in 0..maze.len() {
-        for col in 0..maze[row].len() {
-            match maze[row][col] {
-                'c' | 'e' => {
-                    let world_x = (col * block_size) as f32 + block_size as f32 / 2.0;
-                    let world_y = (row * block_size) as f32 + block_size as f32 / 2.0;
-                    let sprite = Sprite {
-                        pos: Vector2 { x: world_x, y: world_y },
-                        kind: maze[row][col],
-                    };
-                    draw_sprite(framebuffer, &player, &sprite, &texture_manager, &z_buffer);
-                }
-                _ => {}
-            }
-        }
-    }
-}
+pub fn render(framebuffer: &mut FrameBuffer, objects: &[Cube], camera: &Camera, light: &Light, texture_manager: &TextureManager) {
+    let width = framebuffer.image_width as f32;
+    let height = framebuffer.image_height as f32;
+    let aspect_ratio = width / height;
+    let fov = PI / 3.0;
+    let perspective_scale = (fov * 0.5).tan();
 
-fn draw_sprite(
-    framebuffer: &mut FrameBuffer,
-    player: &Player,
-    sprite: &Sprite,
-    texture_manager: &TextureManager,
-    z_buffer: &Vec<f32>
-) {
-    
-    let dx = sprite.pos.x - player.pos.x;
-    let dy = sprite.pos.y - player.pos.y;
-    let distance = (dx*dx + dy*dy).sqrt();
+    for y in 0..framebuffer.image_height {
+        for x in 0..framebuffer.image_width {
+            let screen_x = (2.0 * x as f32) / width - 1.0;
+            let screen_y = -(2.0 * y as f32) / height + 1.0;
 
-    
-    let angle_to_sprite = dy.atan2(dx);
-    let mut angle_diff = angle_to_sprite - player.a;
-    while angle_diff > PI { angle_diff -= 2.0 * PI; }
-    while angle_diff < -PI { angle_diff += 2.0 * PI; }
+            let screen_x = screen_x * aspect_ratio * perspective_scale;
+            let screen_y = screen_y * perspective_scale;
 
-    
-    if angle_diff.abs() > player.fov / 2.0 {
-        return;
-    }
+            let ray_direction = Vector3::new(screen_x, screen_y, -1.0).normalized();
+            
+            let rotated_direction = camera.basis_change(&ray_direction);
 
-    let scale = 5.0; 
-    let sprite_size = ((framebuffer.image_height as f32 / distance) * scale) as usize;
+            let pixel_color_v3 = cast_ray(&camera.eye, &rotated_direction, objects, light, texture_manager, 0);
+            let pixel_color = vector3_to_color(pixel_color_v3);
 
-    let middle_screen = framebuffer.image_width as f32 / 2.0;
-    let screen_x = middle_screen + angle_diff * framebuffer.image_width as f32 / player.fov;
-
-    let start_x = (screen_x as isize - (sprite_size as isize) / 2).max(0) as usize;
-    let half_screen = framebuffer.image_height as usize / 2;
-    let half_sprite = sprite_size / 2;
-    let start_y = half_screen.saturating_sub(half_sprite);
-
-    let end_x = (start_x + sprite_size).min(framebuffer.image_width as usize);
-    let end_y = (start_y + sprite_size).min(framebuffer.image_height as usize);
-
-    for x in start_x..end_x {
-        
-        if distance < z_buffer[x] {
-            for y in start_y..end_y {
-                let tx = ((x - start_x) * 128 / sprite_size) as u32;
-                let ty = ((y - start_y) * 128 / sprite_size) as u32;
-
-                let color = texture_manager.get_pixel_color(sprite.kind, tx, ty);
-
-                if color != TRANSPARENT_COLOR {
-                    framebuffer.set_pixel(x as i32, y as i32, color );
-                }
-            }
+            framebuffer.set_pixel(x, y, pixel_color);
         }
     }
 }
@@ -251,15 +275,11 @@ fn main() {
     let framebuffer_height = 900;
     let window_width = 1300;
     let window_height = 900;
-    let block_size = 100;
-    let mut start = false;
-    let mut win = false;
     let framebuffer_color = Color::BLACK;
-    let mut maze = Vec::new();
 
     let (mut window, mut raylib_thread) = raylib::init()
         .size(window_width, window_height)
-        .title("Pacman Maze")
+        .title("MC Diorama")
         .log_level(TraceLogLevel::LOG_ALL)
         .build();
 
@@ -270,27 +290,56 @@ fn main() {
         1 
     );
 
-    let texture_manager = texture::TextureManager::new(
+    let mut texture_manager = TextureManager::new();
+    texture_manager.load_texture(
         &mut window,
-        &mut raylib_thread
+        &raylib_thread,
+        "assets/Diamond_Ore.png",
     );
 
-
-
     
+    let rubber = Material::new(
+        Vector3::new(0.3, 0.1, 0.1),
+        10.0,
+        [0.9, 0.1, 0.0, 0.0],
+        0.0,
+        Some("assets/Diamond_Ore.png".to_string()),
+    );
 
-    let mut player = Player {
-        pos: Vector2::new(150.0, 150.0),
-        a: PI / 3.0,
-        fov: PI / 3.0,
-    };
+    let ivory = Material::new(
+        Vector3::new(0.4, 0.4, 0.3),
+        50.0,
+        [0.6, 0.3, 0.1, 0.0],
+        0.0,
+        None,
+    );
 
-    let texture = texture_manager.get_texture('#');
+    let glass = Material::new(
+        Vector3::new(0.6, 0.7, 0.8),
+        125.0,
+        [0.0, 0.5, 0.1, 0.8],
+        1.5,
+        None,
+    );
 
-    let startpic = window.load_texture(&mut raylib_thread, "assets/start.png").unwrap();
-    let winpic = window.load_texture(&mut raylib_thread, "assets/win.png").unwrap();
+    let objects = [
+        Cube { center: Vector3::new(0.0, 0.0, 0.0), size: 1.0, material: rubber },
+        // Cube { center: Vector3::new(-1.0, -1.0, 1.5), size: 1.0, material: ivory },
+        // Cube { center: Vector3::new(-0.3, 0.3, 1.5), size: 0.5, material: glass },
+    ];
 
-    
+    let mut camera = Camera::new(
+        Vector3::new(0.0, 0.0, 5.0),
+        Vector3::new(0.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    );
+    let rotation_speed = PI / 100.0;
+
+    let light = Light::new(
+        Vector3::new(1.0, -1.0, 5.0),
+        Color::new(255, 255, 255, 255),
+        1.5,
+    );
 
     
 
@@ -300,58 +349,22 @@ fn main() {
         if window.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
             break;
         }
-
-        if !start{
-            
-
-            if window.is_key_pressed(KeyboardKey::KEY_ENTER) {
-                maze = load_maze("maze.txt");
-                start = true;
-            }
-            if window.is_key_pressed(KeyboardKey::KEY_SPACE) {
-                maze = load_maze("maze2.txt");
-                start = true;
-            }
-            if window.is_key_pressed(KeyboardKey::KEY_E) {
-                maze = load_maze("maze1.txt");
-                start = true;
-            }
-
-            framebuffer.swap_buffers_image(&mut window, &raylib_thread, &startpic);
-            thread::sleep(Duration::from_millis(8));
-            continue;
+        if window.is_key_down(KeyboardKey::KEY_LEFT) {
+            camera.orbit(rotation_speed, 0.0);
         }
-        
-        if win {
-            if window.is_key_pressed(KeyboardKey::KEY_R) {
-                win = false;
-                start = false;
-                player.pos = Vector2::new(150.0, 150.0);
-            }
-            framebuffer.swap_buffers_image(&mut window, &raylib_thread, &winpic);
-            thread::sleep(Duration::from_millis(8));
-            continue;
+        if window.is_key_down(KeyboardKey::KEY_RIGHT) {
+            camera.orbit(-rotation_speed, 0.0);
         }
-        
-        if maze.iter().all(|row| row.iter().all(|&cell| cell != 'c')) {
-            win = true;
+        if window.is_key_down(KeyboardKey::KEY_UP) {
+            camera.orbit(0.0, -rotation_speed);
+        }
+        if window.is_key_down(KeyboardKey::KEY_DOWN) {
+            camera.orbit(0.0, rotation_speed);
         }
 
-        process_events(&mut player, &mut window, &mut maze, block_size);
 
-        for x in 0..framebuffer.image_width {
-            for y in ((framebuffer.image_height)/2)..framebuffer.image_height {
-                framebuffer.set_pixel(x, y, Color::from_hex("5c9599").unwrap());
-            }
-        }
+        render(&mut framebuffer, &objects, &camera, &light, &texture_manager);
 
-        let mut z_buffer = vec![f32::MAX; framebuffer.image_width as usize];
-        render_world(&mut framebuffer, &texture_manager, &maze, block_size, &player, &mut z_buffer);
-        render_maze(&mut framebuffer, &maze, 15, &player);
-        render_sprites(&mut framebuffer, &maze, &player, &texture_manager, block_size, &z_buffer);
-
-        
-        
 
         framebuffer.swap_buffers(&mut window, &raylib_thread);
         thread::sleep(Duration::from_millis(8));
