@@ -10,6 +10,7 @@ use raylib::prelude::*;
 use raylib::prelude::RaylibDraw;
 use std::f32::consts::PI;
 use std::io::BufReader;
+use rayon::prelude::*;
 
 mod framebuffers;
 mod ray_intersect;
@@ -35,14 +36,14 @@ fn procedural_sky(dir: Vector3) -> Vector3 {
     let d = dir.normalized();
     let t = (d.y + 1.0) * 0.5; // map y [-1,1] → [0,1]
 
-    let green = Vector3::new(0.1, 0.6, 0.2); // grass green
+    let grass = Vector3::new(0.7, 0.8, 0.7); // winter grass green (desaturated, pale)
     let white = Vector3::new(1.0, 1.0, 1.0); // horizon haze
     let blue = Vector3::new(0.3, 0.5, 1.0);  // sky blue
 
     if t < 0.54 {
-        // Bottom → fade green to white
+        // Bottom → fade grass to white
         let k = t / 0.55;
-        green * (1.0 - k) + white * k
+        grass * (1.0 - k) + white * k
     } else if t < 0.55 {
         // Around horizon → mostly white
         white
@@ -244,16 +245,23 @@ pub fn cast_ray(
 }
 
 pub fn render(framebuffer: &mut FrameBuffer, objects: &[Cube], camera: &Camera, light: &Light, texture_manager: &TextureManager) {
-    let width = framebuffer.image_width as f32;
-    let height = framebuffer.image_height as f32;
-    let aspect_ratio = width / height;
+    let width = framebuffer.image_width as u32;
+    let height = framebuffer.image_height as u32;
+    let aspect_ratio = width as f32 / height as f32;
     let fov = PI / 3.0;
     let perspective_scale = (fov * 0.5).tan();
 
-    for y in 0..framebuffer.image_height {
-        for x in 0..framebuffer.image_width {
-            let screen_x = (2.0 * x as f32) / width - 1.0;
-            let screen_y = -(2.0 * y as f32) / height + 1.0;
+    let mut scratch: Vec<Color> = vec![Color::new(0,0,0,255); width as usize * height as usize];
+
+    scratch
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(idx, pixel)| {
+            let x = (idx as u32) % width;
+            let y = (idx as u32) / width;
+
+            let screen_x = (2.0 * x as f32) / width as f32 - 1.0;
+            let screen_y = -(2.0 * y as f32) / height as f32 + 1.0;
 
             let screen_x = screen_x * aspect_ratio * perspective_scale;
             let screen_y = screen_y * perspective_scale;
@@ -265,9 +273,36 @@ pub fn render(framebuffer: &mut FrameBuffer, objects: &[Cube], camera: &Camera, 
             let pixel_color_v3 = cast_ray(&camera.eye, &rotated_direction, objects, light, texture_manager, 0);
             let pixel_color = vector3_to_color(pixel_color_v3);
 
-            framebuffer.set_pixel(x, y, pixel_color);
+            *pixel = pixel_color;
+        });
+
+        for y in 0..height {
+            let row = &scratch[(y * width) as usize .. ((y + 1) * width) as usize];
+            for x in 0..width {
+                framebuffer.set_pixel(x as i32, y as i32, row[x as usize]);
+            }
         }
-    }
+        
+    
+
+    // for y in 0..framebuffer.image_height {
+    //     for x in 0..framebuffer.image_width {
+    //         let screen_x = (2.0 * x as f32) / width - 1.0;
+    //         let screen_y = -(2.0 * y as f32) / height + 1.0;
+
+    //         let screen_x = screen_x * aspect_ratio * perspective_scale;
+    //         let screen_y = screen_y * perspective_scale;
+
+    //         let ray_direction = Vector3::new(screen_x, screen_y, -1.0).normalized();
+            
+    //         let rotated_direction = camera.basis_change(&ray_direction);
+
+    //         let pixel_color_v3 = cast_ray(&camera.eye, &rotated_direction, objects, light, texture_manager, 0);
+    //         let pixel_color = vector3_to_color(pixel_color_v3);
+
+    //         framebuffer.set_pixel(x, y, pixel_color);
+    //     }
+    // }
 }
 
 fn main() {
@@ -294,49 +329,298 @@ fn main() {
     texture_manager.load_texture(
         &mut window,
         &raylib_thread,
-        "assets/Diamond_Ore.png",
+        "assets/wool_colored_black.png",
+    );
+    texture_manager.load_texture(
+        &mut window,
+        &raylib_thread,
+        "assets/wool_colored_orange.png",
+    );
+    texture_manager.load_texture(
+        &mut window,
+        &raylib_thread,
+        "assets/wool_colored_white.png",
+    );
+    texture_manager.load_texture(
+        &mut window,
+        &raylib_thread,
+        "assets/wool_colored_pink.png",
+    );
+    texture_manager.load_texture(
+        &mut window,
+        &raylib_thread,
+        "assets/hardened_clay_stained_orange.png",
+    );
+    texture_manager.load_texture(
+        &mut window,
+        &raylib_thread,
+        "assets/obsidian.png",
+    );
+    texture_manager.load_texture(
+        &mut window,
+        &raylib_thread,
+        "assets/gold_block.png",
     );
 
     
-    let rubber = Material::new(
-        Vector3::new(0.3, 0.1, 0.1),
-        10.0,
-        [0.9, 0.1, 0.0, 0.0],
+
+    
+    let black_wool = Material::new(
+        Vector3::new(0.3, 0.2, 0.1),
+        5.0,
+        [0.95, 0.05, 0.0, 0.0],
         0.0,
-        Some("assets/Diamond_Ore.png".to_string()),
+        Some("assets/wool_colored_black.png".to_string()),
     );
 
-    let ivory = Material::new(
+    let orange_wool = Material::new(
+        Vector3::new(0.8, 0.8, 0.7),
+        5.0,
+        [0.98, 0.02, 0.0, 0.0],
+        0.0,
+        Some("assets/wool_colored_orange.png".to_string()),
+    );
+
+    let white_wool = Material::new(
+        Vector3::new(0.8, 0.8, 0.7),
+        5.0,
+        [0.98, 0.02, 0.0, 0.0],
+        0.0,
+        Some("assets/wool_colored_white.png".to_string()),
+    );
+
+    let pink_wool = Material::new(
+        Vector3::new(0.9, 0.7, 0.8),
+        5.0,
+        [0.98, 0.02, 0.0, 0.0],
+        0.0,
+        Some("assets/wool_colored_pink.png".to_string()),
+    );
+
+    let orange_clay = Material::new(
+        Vector3::new(0.7, 0.3, 0.2),
+        12.0,
+        [0.9, 0.1, 0.0, 0.0],
+        0.0,
+        Some("assets/hardened_clay_stained_orange.png".to_string()),
+    );
+
+
+    let obsidian = Material::new(
         Vector3::new(0.4, 0.4, 0.3),
         50.0,
         [0.6, 0.3, 0.1, 0.0],
         0.0,
-        None,
+        Some("assets/obsidian.png".to_string()),
     );
 
     let glass = Material::new(
-        Vector3::new(0.6, 0.7, 0.8),
+        Vector3::new(1.0, 0.5, 0.1), // orange color
         125.0,
         [0.0, 0.5, 0.1, 0.8],
         1.5,
         None,
     );
 
+    let gold = Material::new(
+        Vector3::new(1.0, 0.84, 0.0),
+        65.0,
+        [0.2, 0.6, 0.2, 0.0],
+        0.0,
+        Some("assets/gold_block.png".to_string()),
+    );
+
     let objects = [
-        Cube { center: Vector3::new(0.0, 0.0, 0.0), size: 1.0, material: rubber },
-        // Cube { center: Vector3::new(-1.0, -1.0, 1.5), size: 1.0, material: ivory },
-        // Cube { center: Vector3::new(-0.3, 0.3, 1.5), size: 0.5, material: glass },
+        
+        Cube { center: Vector3::new(0.0, -1.0, 1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(1.0, -1.0, 1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(2.0, -1.0, 1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(3.0, -1.0, 1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(4.0, -1.0, 1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(5.0, -1.0, 1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(6.0, -1.0, 1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(7.0, -1.0, 1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(8.0, -1.0, 1.0), size: 1.0, material: white_wool.clone() },
+
+        Cube { center: Vector3::new(4.0, -1.0, 2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(5.0, -1.0, 2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(6.0, -1.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(7.0, -1.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, -1.0, 2.0), size: 1.0, material: orange_wool.clone() },
+
+        Cube { center: Vector3::new(-1.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(0.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(1.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(2.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(3.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(4.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+
+        Cube { center: Vector3::new(-1.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(0.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(1.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(2.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(3.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(4.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+
+        Cube { center: Vector3::new(-1.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(0.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(1.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(2.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(3.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(4.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+
+        Cube { center: Vector3::new(5.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(5.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(5.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(6.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(6.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(6.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(7.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(7.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(7.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(8.0, -1.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(8.0, -1.0, -2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(8.0, -1.0, 0.0), size: 1.0, material: white_wool.clone() },
+
+
+        Cube { center: Vector3::new(0.0, 0.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(1.0, 0.0, 1.0), size: 1.0, material: black_wool.clone() },
+        Cube { center: Vector3::new(2.0, 0.0, 1.0), size: 1.0, material: black_wool.clone() },
+        Cube { center: Vector3::new(3.0, 0.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(0.0, 1.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(1.0, 1.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(2.0, 1.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(3.0, 1.0, 1.0), size: 1.0, material: orange_wool.clone() },
+
+        
+        Cube { center: Vector3::new(-1.0, 0.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(4.0, 0.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 1.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(4.0, 1.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 2.0, 0.0), size: 1.0, material: black_wool.clone() },
+        Cube { center: Vector3::new(0.0, 2.0, 0.0), size: 1.0, material: black_wool.clone() },
+        Cube { center: Vector3::new(1.0, 2.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(2.0, 2.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(3.0, 2.0, 0.0), size: 1.0, material: black_wool.clone() },
+        Cube { center: Vector3::new(4.0, 2.0, 0.0), size: 1.0, material: black_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 3.0, 0.0), size: 1.0, material: orange_clay.clone() },
+        Cube { center: Vector3::new(0.0, 3.0, 0.0), size: 1.0, material: orange_clay.clone() },
+        Cube { center: Vector3::new(1.0, 3.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(2.0, 3.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(3.0, 3.0, 0.0), size: 1.0, material: orange_clay.clone() },
+        Cube { center: Vector3::new(4.0, 3.0, 0.0), size: 1.0, material: orange_clay.clone() },
+        Cube { center: Vector3::new(-1.0, 3.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 4.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(0.0, 4.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(1.0, 4.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(2.0, 4.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(3.0, 4.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(4.0, 4.0, 0.0), size: 1.0, material: orange_wool.clone() },
+
+        Cube { center: Vector3::new(-1.0, 5.0, -1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(0.0, 5.0, -1.0), size: 1.0, material: pink_wool.clone() },
+        Cube { center: Vector3::new(3.0, 5.0, -1.0), size: 1.0, material: pink_wool.clone() },
+        Cube { center: Vector3::new(4.0, 5.0, -1.0), size: 1.0, material: white_wool.clone() },
+
+        Cube { center: Vector3::new(-1.0, 6.0, -1.0), size: 1.0, material: obsidian.clone() },
+        Cube { center: Vector3::new(0.0, 6.0, -1.0), size: 1.0, material: obsidian.clone() },
+        Cube { center: Vector3::new(3.0, 6.0, -1.0), size: 1.0, material: obsidian.clone() },
+        Cube { center: Vector3::new(4.0, 6.0, -1.0), size: 1.0, material: obsidian.clone() },
+
+        Cube { center: Vector3::new(-1.0, 2.0, 1.5), size: 1.0, material: glass.clone() },
+        Cube { center: Vector3::new(0.0, 2.0, 1.5), size: 1.0, material: glass.clone() },
+
+        Cube { center: Vector3::new(0.5, 2.0, 1.5), size: 0.5, material: gold.clone() },
+        Cube { center: Vector3::new(1.0, 2.0, 1.5), size: 0.5, material: gold.clone() },
+        Cube { center: Vector3::new(1.5, 2.0, 1.5), size: 0.5, material: gold.clone() },
+        Cube { center: Vector3::new(2.0, 2.0, 1.5), size: 0.5, material: gold.clone() },
+        Cube { center: Vector3::new(2.5, 2.0, 1.5), size: 0.5, material: gold.clone() },
+
+        Cube { center: Vector3::new(3.0, 2.0, 1.5), size: 1.0, material: glass.clone() },
+
+
+        Cube { center: Vector3::new(-1.0, 0.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 1.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 2.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 3.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 4.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 0.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 1.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 2.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 3.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(-1.0, 4.0, -2.0), size: 1.0, material: orange_wool.clone() },
+
+        Cube { center: Vector3::new(0.0, 4.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(0.0, 4.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(1.0, 4.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(1.0, 4.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(2.0, 4.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(2.0, 4.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(3.0, 4.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(3.0, 4.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(4.0, 4.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(4.0, 4.0, -2.0), size: 1.0, material: orange_wool.clone() },
+
+        Cube { center: Vector3::new(5.0, 3.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(5.0, 3.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(6.0, 3.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(6.0, 3.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(7.0, 3.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(7.0, 3.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 3.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 3.0, -2.0), size: 1.0, material: orange_wool.clone() },
+
+
+        Cube { center: Vector3::new(4.0, 2.0, 1.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(4.0, 2.0, 2.0), size: 1.0, material: white_wool.clone() },
+
+        Cube { center: Vector3::new(5.0, 2.0, 0.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(5.0, 2.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(5.0, 2.0, 2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(6.0, 2.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(6.0, 2.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(6.0, 2.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(7.0, 2.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(7.0, 2.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(7.0, 2.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 2.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 2.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 2.0, 2.0), size: 1.0, material: orange_wool.clone() },
+
+        Cube { center: Vector3::new(4.0, 1.0, 2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(5.0, 1.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(6.0, 1.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(7.0, 1.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 1.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(4.0, 0.0, 2.0), size: 1.0, material: white_wool.clone() },
+        Cube { center: Vector3::new(5.0, 0.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(6.0, 0.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(7.0, 0.0, 2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 0.0, 2.0), size: 1.0, material: orange_wool.clone() },
+
+        Cube { center: Vector3::new(8.0, 1.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 0.0, 1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 1.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 0.0, 0.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 2.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 1.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 0.0, -1.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 2.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 1.0, -2.0), size: 1.0, material: orange_wool.clone() },
+        Cube { center: Vector3::new(8.0, 0.0, -2.0), size: 1.0, material: orange_wool.clone() },
+
+
     ];
 
     let mut camera = Camera::new(
-        Vector3::new(0.0, 0.0, 5.0),
-        Vector3::new(0.0, 0.0, 0.0),
+        Vector3::new(0.0, 0.0, 15.0),
+        Vector3::new(3.0, 2.0, 0.0),
         Vector3::new(0.0, 1.0, 0.0),
     );
     let rotation_speed = PI / 100.0;
 
     let light = Light::new(
-        Vector3::new(1.0, -1.0, 5.0),
+        Vector3::new(15.0, 15.0, 15.0),
         Color::new(255, 255, 255, 255),
         1.5,
     );
@@ -346,7 +630,7 @@ fn main() {
     while !window.window_should_close() {
         framebuffer.clear();
 
-        if window.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
+        if window.is_key_pressed(KeyboardKey::KEY_ESCAPE)|| window.is_key_pressed(KeyboardKey::KEY_Q) {
             break;
         }
         if window.is_key_down(KeyboardKey::KEY_LEFT) {
@@ -362,12 +646,19 @@ fn main() {
             camera.orbit(0.0, rotation_speed);
         }
 
+        if window.is_key_down(KeyboardKey::KEY_O) {
+            camera.zoom(0.1);
+        }
+        if window.is_key_down(KeyboardKey::KEY_P) {
+            camera.zoom(-0.1);
+        }
+
 
         render(&mut framebuffer, &objects, &camera, &light, &texture_manager);
 
 
         framebuffer.swap_buffers(&mut window, &raylib_thread);
-        thread::sleep(Duration::from_millis(8));
+        //thread::sleep(Duration::from_millis(8));
     }
 
 
